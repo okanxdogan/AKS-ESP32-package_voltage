@@ -1,0 +1,10 @@
+
+# PlatformIO local build files and IDE settings
+.pio
+
+
+# IDE settings
+.vscode
+
+# Workspace settings
+*.code-workspace
