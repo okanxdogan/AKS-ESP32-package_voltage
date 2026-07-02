@@ -8,14 +8,13 @@ const BaudConfig CanSniffer::BAUD_LIST[] = {
 
 CanSniffer::CanSniffer()
     : mcp(CAN_CS_PIN),
-      seenIds{0},
-      seenCounts{0},
-      seenCount(0),
-      lastSummary(0) {}
+      lastPackVoltageDeciV(0),
+      lastPrintTime(0) {}
 
 void CanSniffer::begin() {
     Serial.println("\n========================================");
-    Serial.println("   BMS CAN Sniffer — MCP2515 + ESP32");
+    Serial.println("  c-BMS24 Pack Voltage Monitor");
+    Serial.println("  Lithium Balance — LiBat CANbus v1.0");
     Serial.println("========================================");
 
     setupInterface();
@@ -38,18 +37,13 @@ void CanSniffer::begin() {
     mcp.setMode(MCP_NORMAL);
     pinMode(CAN_INT_PIN, INPUT);
 
-    Serial.println("\n--- Dinleniyor ---");
-    Serial.println(
-        "TYPE     | ID           | DLC | BYTES (HEX)                     | "
-        "BYTES (DEC)");
-    Serial.println(
-        "---------|--------------|-----|----------------------------------|----"
-        "------------");
+    Serial.println("\n[BILGI] CAN bus dinleniyor...");
+    Serial.println("[BILGI] Hedef CAN ID: 0xE000 (c-BMS24 Status)");
+    Serial.println("[BILGI] Pack Voltage: Byte[2:3], Big-Endian, 0.1V/bit");
+    Serial.println("--------------------------------------------------\n");
 }
 
 void CanSniffer::handle() {
-    printSummary();
-
     if (digitalRead(CAN_INT_PIN) != LOW) {
         return;
     }
@@ -60,29 +54,35 @@ void CanSniffer::handle() {
 
     mcp.readMsgBuf(&rxId, &dlc, buf);
 
-    bool isExtended = (rxId & 0x80000000) != 0;
+    // Extended frame flag'ini temizle, gerçek 29-bit ID'yi al
     rxId &= 0x1FFFFFFF;
 
-    recordId(rxId);
-
-    if (isExtended) {
-        Serial.printf("EXT      | 0x%08lX   |  %d  |", rxId, dlc);
-    } else {
-        Serial.printf("STD      | 0x%03lX          |  %d  |", rxId, dlc);
+    // Sadece 0xE000 (Status + Pack Voltage) mesajını parse et
+    if (rxId == CBMS_ID_STATUS) {
+        parsePackVoltage(buf, dlc);
     }
+}
 
-    for (uint8_t i = 0; i < dlc; i++) {
-        Serial.printf(" %02X", buf[i]);
-    }
-    for (uint8_t i = dlc; i < 8; i++) {
-        Serial.print("   ");
+void CanSniffer::parsePackVoltage(const unsigned char* buf, uint8_t dlc) {
+    if (dlc < 4) {
+        return;  // En az 4 byte gerekli (byte 2-3 pack voltage)
     }
 
-    Serial.print("  |");
-    for (uint8_t i = 0; i < dlc; i++) {
-        Serial.printf(" %3d", buf[i]);
+    // Byte[2] = High byte, Byte[3] = Low byte (Big-Endian)
+    // Değer deci-volt cinsinden: ör. 0x0310 = 784 → 78.4V
+    uint16_t packVDeciV = ((uint16_t)buf[2] << 8) | buf[3];
+
+    lastPackVoltageDeciV = packVDeciV;
+
+    // Terminalde her 500ms'de bir yazdır (flood'u önlemek için)
+    unsigned long now = millis();
+    if (now - lastPrintTime >= 500) {
+        lastPrintTime = now;
+
+        float packVoltage = packVDeciV / 10.0f;
+
+        Serial.printf("Paket Voltaji: %.1f V\n", packVoltage);
     }
-    Serial.println();
 }
 
 void CanSniffer::setupInterface() {
@@ -100,38 +100,4 @@ bool CanSniffer::initMCP() {
         delay(100);
     }
     return false;
-}
-
-void CanSniffer::recordId(uint32_t id) {
-    for (uint8_t i = 0; i < seenCount; i++) {
-        if (seenIds[i] == id) {
-            seenCounts[i]++;
-            return;
-        }
-    }
-    if (seenCount < 64) {
-        seenIds[seenCount] = id;
-        seenCounts[seenCount] = 1;
-        seenCount++;
-    }
-}
-
-void CanSniffer::printSummary() {
-    if (millis() - lastSummary < 5000) {
-        return;
-    }
-    lastSummary = millis();
-
-    if (seenCount == 0) {
-        Serial.println(
-            "\n[OZET] Hic frame alınamadı — BMS baglantisini kontrol et veya "
-            "baud rate yanlis.");
-        return;
-    }
-
-    Serial.printf("\n[OZET] Toplam %d farklı ID goruldu:\n", seenCount);
-    for (uint8_t i = 0; i < seenCount; i++) {
-        Serial.printf("  0x%08lX  →  %lu frame\n", seenIds[i], seenCounts[i]);
-    }
-    Serial.println();
 }
